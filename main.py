@@ -1,4 +1,13 @@
 from mcp.server import MCPServer
+from mcp.server.mcpserver.prompts import base
+from mcp.types import (
+    ResourceTemplateReference,
+    PromptReference,
+    Completion,
+    CompletionArgument,
+    EmbeddedResource,
+    TextResourceContents,
+)
 from datetime import datetime, timezone, timedelta
 
 from db import (
@@ -13,7 +22,7 @@ from db import (
 )
 from tg_parser import fetch_page, parse_posts
 
-mcp = MCPServer("tg-mcp")
+mcp = MCPServer("Telegram Watcher")
 
 init_db()
 
@@ -36,6 +45,111 @@ def remove_channel_tool(channelname: str) -> str:
         return f"Канал @{channelname} удалён"
 
     return f"Канал @{channelname} не найден"
+
+
+@mcp.resource("tg://channels")
+def channels_resource() -> str:
+    """Список отслеживаемых Telegram-каналов"""
+    channels = list_channels()
+
+    if not channels:
+        return "Нет отслеживаемых каналов"
+
+    lines = [f"@{c['channelname']} (добавлен {c['added_at']})" for c in channels]
+
+    return "\n".join(lines)
+
+
+@mcp.resource("tg://channel/{name}")
+def channel_resource(name: str) -> str:
+    """Информация об указанном Telegram-канале"""
+    name = name.strip().lower().lstrip("@")
+    channel = get_channel(name)
+
+    if not channel:
+        return f"Канал @{name} не найден"
+
+    return f"@{channel['channelname']} (добавлен {channel['added_at']})"
+
+
+@mcp.resource("tg://channel/{name}/posts")
+def channel_posts_resource(name: str) -> str:
+    """Последние посты канала из кеша (без фетчинга с t.me)"""
+    name = name.strip().lower().lstrip("@")
+    channel = get_channel(name)
+
+    if not channel:
+        return f"Канал @{name} не найден"
+
+    posts = get_posts([channel["id"]], "1970-01-01")[:10]
+
+    if not posts:
+        return f"Нет постов в кеше для @{name}"
+
+    parts = [f"@{name}:"]
+
+    for p in posts:
+        preview = (p["text"][:200] + "…") if len(p["text"]) > 200 else p["text"]
+        parts.append(f"[{p['date']}] {preview}")
+
+    return "\n".join(parts)
+
+
+@mcp.prompt()
+def digest(days: int = 7, channels: str | None = None):
+    """Составить дайджест постов за последние N дней по указанным каналам"""
+    instruction = (
+        f"посмотри в методе query_posts(days={days}) посты "
+        f"и составь дайджест по указанным каналам. "
+        f"по каждому каналу 2-3 предложения на главные темы. "
+        f"Если каналов нет - сообщи об этом пользователю. "
+        f"Если темы пересекаются - не нужно их отображать, покажи один раз, "
+        f"а в остальных источниках пропусти данную тему."
+    )
+
+    if channels is None:
+        return [
+            base.UserMessage(
+                EmbeddedResource(
+                    type="resource",
+                    resource=TextResourceContents(
+                        uri="tg://channels",
+                        text=channels_resource(),
+                        mimeType="text/plain",
+                    ),
+                )
+            ),
+            base.UserMessage(instruction),
+        ]
+
+    return [
+        base.UserMessage(f"Каналы: {channels}\n\n{instruction}"),
+    ]
+
+
+@mcp.completion()
+async def complete_channel_name(ref, argument: CompletionArgument, context) -> Completion | None:
+    if isinstance(ref, ResourceTemplateReference):
+        channels = list_channels()
+        names = [c["channelname"] for c in channels]
+        return Completion(
+            values=[
+                n for n in names
+                if n.lower().startswith(argument.value.lower())
+            ]
+        )
+
+    if isinstance(ref, PromptReference) and argument.name == "channels":
+        channels = list_channels()
+        names = [c["channelname"] for c in channels]
+        return Completion(
+            values=[
+                n for n in names
+                if n.lower().startswith(argument.value.lower())
+            ]
+        )
+
+    return None
 
 
 @mcp.tool()
